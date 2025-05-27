@@ -1,0 +1,15 @@
+[package]
+name = "resolution_protocol"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+aes-gcm = { version = "0.10.3", features = ["std", "stream"] }
+anyhow = "1.0.98"
+derive_builder = "0.20.2"
+iroh = { version = "0.35.0", features = ["discovery-local-network", "discovery-pkarr-dht"] }
+log = { version = "0.4.27", features = ["kv_serde", "serde", "std"] }
+oqs = { version = "0.11.0", features = ["vendored", "serde"] }
+serde = { version = "1.0.219", features = ["derive"] }
+thiserror = "2.0.12"
+uuid = { version = "1.17.0", features = ["serde", "v4", "fast-rng"] }
