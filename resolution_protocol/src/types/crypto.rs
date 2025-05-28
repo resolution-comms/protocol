@@ -1,20 +1,15 @@
 use std::{
     convert::Infallible,
-    ops::{Deref, DerefMut},
-    str::FromStr,
+    ops::{Deref, DerefMut}
 };
 
 use aes_gcm::{
-    Aes256Gcm,
-    Key, // Or `Aes128Gcm`
-    Nonce,
-    aead::{Aead, AeadCore, KeyInit, OsRng},
+    aead::{Aead, AeadCore, KeyInit, OsRng}, Aes256Gcm, Key, Nonce
 };
-use base64::prelude::*;
-use serde::{Deserialize, Serialize};
+use serde::{de::DeserializeOwned, Deserialize, Serialize};
 use serde_with::serde_as;
 
-type B64 = serde_with::base64::Base64<serde_with::base64::UrlSafe, serde_with::formats::Unpadded>;
+use super::encodings::{Msgpack, B64};
 
 #[derive(Clone)]
 struct AesKey(Key<Aes256Gcm>);
@@ -51,58 +46,7 @@ impl DerefMut for AesKey {
     }
 }
 
-#[derive(Serialize, Deserialize, Clone, Debug)]
-pub struct Base64(String);
-
-impl<T: IntoIterator<Item = u8>> From<T> for Base64 {
-    fn from(value: T) -> Self {
-        Self(BASE64_URL_SAFE_NO_PAD.encode(value.into_iter().collect::<Vec<u8>>()))
-    }
-}
-
-impl AsRef<str> for Base64 {
-    fn as_ref(&self) -> &str {
-        &self.0
-    }
-}
-
-impl Into<String> for Base64 {
-    fn into(self) -> String {
-        self.0.clone()
-    }
-}
-
-impl FromStr for Base64 {
-    type Err = Infallible;
-    fn from_str(s: &str) -> Result<Self, Self::Err> {
-        Ok(Self(s.to_string()))
-    }
-}
-
-impl TryInto<Vec<u8>> for Base64 {
-    type Error = crate::Error;
-    fn try_into(self) -> Result<Vec<u8>, Self::Error> {
-        BASE64_URL_SAFE_NO_PAD
-            .decode(self.0)
-            .or_else(|e| Err(crate::Error::from(e)))
-    }
-}
-
-impl Base64 {
-    pub fn new(value: impl IntoIterator<Item = u8>) -> Self {
-        Self::from(value)
-    }
-
-    pub fn value(&self) -> Vec<u8> {
-        self.clone()
-            .try_into()
-            .expect("Contained value is non-parseable/wrong format.")
-    }
-
-    pub fn try_value(&self) -> crate::Result<Vec<u8>> {
-        self.clone().try_into()
-    }
-}
+pub type SymmetricCipher = Msgpack<(Vec<u8>, Vec<u8>)>;
 
 #[serde_as]
 #[derive(Clone, Serialize, Deserialize)]
@@ -117,13 +61,29 @@ impl SymmetricKey {
         Aes256Gcm::new(&self.0.0)
     }
 
-    pub fn encrypt(&self, data: impl AsRef<[u8]>) -> crate::Result<String> {
+    pub fn encrypt(&self, data: impl AsRef<[u8]>) -> crate::Result<SymmetricCipher> {
         let nonce = Aes256Gcm::generate_nonce(OsRng);
         let ciphertext = self
             .cipher()
             .encrypt(&nonce, data.as_ref())
             .or_else(|e| Err(crate::Error::from(e)))?;
 
-        Ok(String::new())
+        Msgpack::encode(&(nonce.to_vec(), ciphertext))
+    }
+
+    pub fn decrypt(&self, cipher: impl Into<SymmetricCipher>) -> crate::Result<Vec<u8>> {
+        let msgpack = cipher.into();
+        let (nonce, ciphertext) = msgpack.decode()?;
+        self.cipher().decrypt(&Nonce::from_slice(&nonce), ciphertext.as_slice()).or_else(|e| Err(crate::Error::from(e)))
+    }
+
+    pub fn encrypt_data(&self, data: impl Serialize) -> crate::Result<SymmetricCipher> {
+        let serialized = rmp_serde::to_vec(&data)?;
+        self.encrypt(serialized)
+    }
+
+    pub fn decrypt_data<T: DeserializeOwned>(&self, cipher: impl Into<SymmetricCipher>) -> crate::Result<T> {
+        let decrypted = self.decrypt(cipher)?;
+        Ok(rmp_serde::from_slice::<T>(decrypted.as_slice())?)
     }
 }

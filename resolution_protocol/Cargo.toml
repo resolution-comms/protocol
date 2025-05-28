@@ -12,6 +12,9 @@ derive_builder = "0.20.2"
 iroh = { version = "0.35.0", features = ["discovery-local-network", "discovery-pkarr-dht"] }
 log = { version = "0.4.27", features = ["kv_serde", "serde", "std"] }
 oqs = { version = "0.11.0", features = ["vendored", "serde"] }
+rmp = "0.8.14"
+rmp-serde = "1.3.0"
+rmpv = { version = "1.3.0", features = ["serde", "serde_bytes", "with-serde"] }
 serde = { version = "1.0.219", features = ["derive"] }
 serde_json = "1.0.140"
 serde_with = { version = "3.12.0", features = ["base64"] }
