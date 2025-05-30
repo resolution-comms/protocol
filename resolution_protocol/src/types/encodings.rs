@@ -69,6 +69,10 @@ pub struct Msgpack<T: Serialize + DeserializeOwned = Value>(
 );
 
 impl<T: Serialize + DeserializeOwned> Msgpack<T> {
+    pub fn as_slice(&self) -> &[u8] {
+        &self.0
+    }
+
     pub fn encode(data: &T) -> crate::Result<Self> {
         Ok(Self(rmp_serde::to_vec(data)?, PhantomData))
     }

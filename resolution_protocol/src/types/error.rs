@@ -14,6 +14,12 @@ pub enum Error {
     #[error("MSGPACK encoding error: {0:?}")]
     MsgpackEncoding(#[from] rmp_serde::encode::Error),
 
+    #[error("Encountered internal OQS cryptography error: {0:?}")]
+    OQS(#[from] oqs::Error),
+
+    #[error("Invalid bytestring length: expected {0}, got {1}")]
+    BadLength(usize, usize),
+
     #[error(transparent)]
     Other(#[from] anyhow::Error),
 }
