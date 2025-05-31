@@ -125,11 +125,7 @@ impl EncryptionContext {
         (self.encryption.1.clone(), self.signing.1.clone())
     }
 
-    pub fn new_shared_secret(&self) -> SharedSecret {
-        SharedSecret::generate()
-    }
-
-    pub fn single_encrypt(&self, target: &kem::PublicKey, data: impl AsRef<Vec<u8>>) -> crate::Result<(SingleCipher, Signature)> {
+    pub fn encrypt(&self, target: &kem::PublicKey, data: impl AsRef<Vec<u8>>) -> crate::Result<(SingleCipher, Signature)> {
         let nonce = Aes256Gcm::generate_nonce(OsRng);
         let (encrypted_secret, ss) = self.kem.encapsulate(target)?;
         let encryption_key: Key<Aes256> = SharedSecret::try_from(ss.into_vec())?.into();
@@ -144,7 +140,7 @@ impl EncryptionContext {
         Ok((packed, signature))
     }
 
-    pub fn single_decrypt(&self, data: SingleCipher, signature: Signature, known_signer: Option<sig::PublicKey>) -> crate::Result<Vec<u8>> {
+    pub fn decrypt(&self, data: SingleCipher, signature: Signature, known_signer: Option<sig::PublicKey>) -> crate::Result<Vec<u8>> {
         let unpacked = data.decode()?;
         let signer = known_signer.unwrap_or(unpacked.origin.1);
         self.sig.verify(data.as_slice(),&signature,&signer)?;
