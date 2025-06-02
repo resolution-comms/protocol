@@ -1,10 +1,11 @@
-use std::{ops::{Deref, DerefMut}, sync::Arc};
+use std::{fmt::Debug, ops::{Deref, DerefMut}, sync::Arc};
 
-use aes_gcm::{aead::{Aead, OsRng}, aes::Aes256, AeadCore, Aes256Gcm, Key, KeyInit};
+use aes_gcm::{aead::{Aead, OsRng}, aes::Aes256, AeadCore, Aes256Gcm, Key, KeyInit, Nonce};
 use generic_array::{GenericArray, typenum};
-use oqs::{self, kem::{self, Ciphertext}, sig::{self, Signature}};
+use oqs::{self, kem::{self, Ciphertext}, sig};
 use serde::{Deserialize, Serialize};
 use serde_with::serde_as;
+use uuid::Uuid;
 
 use super::encodings::{Msgpack, B64};
 
@@ -67,20 +68,40 @@ impl SharedSecret {
     }
 }
 
-#[serde_as]
+pub type SingleEncryption = (
+    Msgpack<(
+        Ciphertext, // Encrypted shared secret
+        Vec<u8>, // Nonce
+        Vec<u8> // Encrypted content
+    )>, 
+    sig::Signature
+);
+
+pub type GroupEncryption = (
+    Msgpack<(
+        Uuid, // Key ID
+        Vec<u8>, // Nonce
+        Vec<u8> //Encrypted content
+    )>, 
+    sig::Signature
+);
+
 #[derive(Serialize, Deserialize, Clone, Debug)]
-pub struct SingleEncryptionCipherBody {
-    pub origin: (kem::PublicKey, sig::PublicKey),
+pub struct GroupKey(Uuid, SharedSecret);
 
-    #[serde_as(as = "B64")]
-    pub nonce: Vec<u8>,
-    pub shared: Ciphertext,
+impl GroupKey {
+    pub fn new() -> Self {
+        Self(Uuid::new_v4(), SharedSecret::generate())
+    }
 
-    #[serde_as(as = "B64")]
-    pub cipher: Vec<u8>
+    pub fn id(&self) -> Uuid {
+        self.0.clone()
+    }
+
+    pub fn key(&self) -> SharedSecret {
+        self.1.clone()
+    }
 }
-
-pub type SingleCipher = Msgpack<SingleEncryptionCipherBody>;
 
 #[derive(Serialize, Deserialize, Clone)]
 pub struct EncryptionContext {
@@ -121,32 +142,60 @@ impl EncryptionContext {
         (self.encryption.0.clone(), self.signing.0.clone())
     }
 
-    fn secret_keys(&self) -> (kem::SecretKey, sig::SecretKey) {
+    pub fn secret_keys(&self) -> (kem::SecretKey, sig::SecretKey) {
         (self.encryption.1.clone(), self.signing.1.clone())
     }
 
-    pub fn encrypt(&self, target: &kem::PublicKey, data: impl AsRef<Vec<u8>>) -> crate::Result<(SingleCipher, Signature)> {
+    pub fn encrypt_direct(&self, target: impl AsRef<kem::PublicKey>, data: impl AsRef<Vec<u8>>) -> crate::Result<SingleEncryption> {
         let nonce = Aes256Gcm::generate_nonce(OsRng);
-        let (encrypted_secret, ss) = self.kem.encapsulate(target)?;
-        let encryption_key: Key<Aes256> = SharedSecret::try_from(ss.into_vec())?.into();
-        let encrypted_data = Aes256Gcm::new(&encryption_key).encrypt(&nonce, data.as_ref().as_slice())?;
-        let packed: SingleCipher = Msgpack::encode(&SingleEncryptionCipherBody {
-            origin: self.public_keys(),
-            nonce: nonce.to_vec(),
-            shared: encrypted_secret,
-            cipher: encrypted_data
-        })?;
-        let signature = self.sig.sign(packed.as_slice(), &self.secret_keys().1)?;
-        Ok((packed, signature))
+        let (opaque_key, ss) = self.kem.encapsulate(target.as_ref())?;
+        let aes = Aes256Gcm::new_from_slice(ss.into_vec().as_slice())?;
+        let encrypted_block = aes.encrypt(&nonce, data.as_ref().as_slice())?;
+        let record = Msgpack::encode(&(opaque_key, nonce.clone().to_vec(), encrypted_block))?;
+        let signature = self.sig.sign(record.as_slice(), &self.secret_keys().1)?;
+
+        Ok((record, signature))
     }
 
-    pub fn decrypt(&self, data: SingleCipher, signature: Signature, known_signer: Option<sig::PublicKey>) -> crate::Result<Vec<u8>> {
-        let unpacked = data.decode()?;
-        let signer = known_signer.unwrap_or(unpacked.origin.1);
-        self.sig.verify(data.as_slice(),&signature,&signer)?;
-        let shared_secret = self.kem.decapsulate(&self.secret_keys().0, &unpacked.shared)?;
-        let aes_key: Key<Aes256> = SharedSecret::try_from(shared_secret.into_vec())?.into();
-        let decrypted_data = Aes256Gcm::new(&aes_key).decrypt(unpacked.nonce.as_slice().into(), unpacked.cipher.as_slice())?;
-        Ok(decrypted_data)
+    pub fn decrypt_direct(&self, data: SingleEncryption, signer: impl AsRef<sig::PublicKey>) -> crate::Result<Vec<u8>> {
+        let (record, signature) = data;
+        let _ = self.sig.verify(record.as_slice(), &signature, signer.as_ref())?;
+        let (ciphertext, nonce, encrypted_block) = record.decode()?;
+        let shared_secret = self.kem.decapsulate(&self.secret_keys().0, &ciphertext)?;
+        let aes = Aes256Gcm::new_from_slice(shared_secret.into_vec().as_slice())?;
+        let decrypted_block = aes.decrypt(Nonce::from_slice(nonce.as_slice()), encrypted_block.as_slice())?;
+
+        Ok(decrypted_block)
+    }
+
+    pub fn encrypt_group(&self, key: GroupKey, targets: impl IntoIterator<Item = impl AsRef<kem::PublicKey>>, data: impl AsRef<Vec<u8>>) -> crate::Result<Vec<(kem::PublicKey, SingleEncryption)>> {
+        let nonce = Aes256Gcm::generate_nonce(OsRng);
+        let aes = Aes256Gcm::new_from_slice(key.key().as_slice())?;
+        let encrypted_block = aes.encrypt(&nonce, data.as_ref().as_slice())?;
+        let record = Msgpack::encode(&(key.id(), nonce.clone().to_vec(), encrypted_block))?;
+        let signature = self.sig.sign(record.as_slice(), &self.secret_keys().1)?;
+        let wrapped_data = Msgpack::encode(&(record, signature))?;
+
+        let mut results = Vec::<(kem::PublicKey, SingleEncryption)>::new();
+        for t in targets {
+            let target = t.as_ref();
+            results.push((target.clone(), self.encrypt_direct(t, wrapped_data.as_slice().to_vec())?));
+        }
+
+        Ok(results)
+    }
+
+    pub fn decrypt_group(&self, key: GroupKey, data: SingleEncryption, signer: impl AsRef<sig::PublicKey>) -> crate::Result<Vec<u8>> {
+        let sign = signer.as_ref();
+        let (group_data, signature) = Msgpack::<GroupEncryption>::from_binary(self.decrypt_direct(data, &signer)?)?.decode()?;
+        let _ = self.sig.verify(group_data.as_slice(), &signature, &sign.clone())?;
+        let (key_id, nonce, encrypted_block) = group_data.decode()?;
+        if key_id != key.id() {
+            return Err(crate::Error::from(crate::UserError::invalid_key_id(key.id(), key_id)));
+        }
+        let aes = Aes256Gcm::new_from_slice(key.key().as_slice())?;
+        let decrypted_block = aes.decrypt(Nonce::from_slice(nonce.as_slice()), encrypted_block.as_slice())?;
+
+        Ok(decrypted_block)
     }
 }
